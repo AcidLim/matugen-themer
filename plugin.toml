@@ -1,0 +1,206 @@
+# Matugen Themer — Noctalia v5+ plugin
+#
+# Drop-in replacement for the old [hooks] wallpaper_changed shell script.
+# Noctalia has no "wallpaper changed" event, so the `themer` service polls the
+# wallpaper path of every output and re-runs Matugen when it moves.
+#
+#   noctalia msg plugins enable matugen-noctalia/matugen-themer
+
+id           = "matugen-noctalia/matugen-themer"
+name         = "Matugen Themer"
+version      = "2.1.0"
+plugin_api   = 25
+author       = "matugen-noctalia"
+license      = "MIT"
+icon         = "palette"
+description  = "Regenerates your Matugen color scheme from the active wallpaper, so every templated app follows the wallpaper automatically."
+tags         = ["theming", "matugen", "wallpaper", "color", "ricing"]
+dependencies = ["matugen", "ffmpeg"]
+
+# Headless service: watches the wallpaper and regenerates the palette.
+[[service]]
+id    = "themer"
+entry = "themer.luau"
+
+# Control-center tile: regenerate on demand (right click opens the settings).
+[[shortcut]]
+id    = "refresh"
+entry = "refresh.luau"
+
+# --- Matugen command line -------------------------------------------------
+# These mirror `matugen image <wallpaper> ...`; see `matugen --help`.
+
+[[setting]]
+key             = "matugen_path"
+type            = "string"
+label_key       = "settings.matugen_path.label"
+description_key = "settings.matugen_path.description"
+default         = "matugen"
+
+[[setting]]
+key             = "config_file"
+type            = "file"
+label_key       = "settings.config_file.label"
+description_key = "settings.config_file.description"
+default         = ""
+extensions      = [".toml"]
+
+[[setting]]
+key             = "type"
+type            = "select"
+label_key       = "settings.type.label"
+description_key = "settings.type.description"
+default         = "scheme-tonal-spot"
+options = [
+  { value = "scheme-content",     label_key = "settings.type.content" },
+  { value = "scheme-expressive",  label_key = "settings.type.expressive" },
+  { value = "scheme-fidelity",    label_key = "settings.type.fidelity" },
+  { value = "scheme-fruit-salad", label_key = "settings.type.fruit_salad" },
+  { value = "scheme-monochrome",  label_key = "settings.type.monochrome" },
+  { value = "scheme-neutral",     label_key = "settings.type.neutral" },
+  { value = "scheme-rainbow",     label_key = "settings.type.rainbow" },
+  { value = "scheme-tonal-spot",  label_key = "settings.type.tonal_spot" },
+  { value = "scheme-vibrant",     label_key = "settings.type.vibrant" },
+]
+
+[[setting]]
+key             = "mode"
+type            = "select"
+label_key       = "settings.mode.label"
+description_key = "settings.mode.description"
+default         = "dark"
+options = [
+  { value = "dark",  label_key = "settings.mode.dark" },
+  { value = "light", label_key = "settings.mode.light" },
+  { value = "auto",  label_key = "settings.mode.auto" },
+]
+
+[[setting]]
+key             = "prefer"
+type            = "select"
+label_key       = "settings.prefer.label"
+description_key = "settings.prefer.description"
+default         = "saturation"
+options = [
+  { value = "darkness",            label_key = "settings.prefer.darkness" },
+  { value = "lightness",           label_key = "settings.prefer.lightness" },
+  { value = "saturation",          label_key = "settings.prefer.saturation" },
+  { value = "less-saturation",     label_key = "settings.prefer.less_saturation" },
+  { value = "value",               label_key = "settings.prefer.value" },
+  { value = "closest-to-fallback", label_key = "settings.prefer.closest_to_fallback" },
+]
+
+[[setting]]
+key             = "source_index"
+type            = "int"
+label_key       = "settings.source_index.label"
+description_key = "settings.source_index.description"
+default         = 0
+min             = 0
+max             = 4
+
+[[setting]]
+key             = "contrast"
+type            = "double"
+label_key       = "settings.contrast.label"
+description_key = "settings.contrast.description"
+default         = 0.0
+min             = -1.0
+max             = 1.0
+
+# --- Video wallpapers -----------------------------------------------------
+# Matugen needs a still image, so a video is sampled with ffmpeg into a cached
+# JPEG first. The mpvpaper plugin's assignments file is read as well, because
+# while a video owns an output Noctalia's own wallpaper path still points at
+# the previous static image.
+
+[[setting]]
+key             = "video_mode"
+type            = "select"
+label_key       = "settings.video_mode.label"
+description_key = "settings.video_mode.description"
+default         = "auto"
+options = [
+  { value = "auto", label_key = "settings.video_mode.auto" },
+  { value = "off",  label_key = "settings.video_mode.off" },
+]
+
+[[setting]]
+key             = "ffmpeg_path"
+type            = "string"
+label_key       = "settings.ffmpeg_path.label"
+description_key = "settings.ffmpeg_path.description"
+default         = "ffmpeg"
+advanced        = true
+
+[[setting]]
+key             = "frame_offset"
+type            = "double"
+label_key       = "settings.frame_offset.label"
+description_key = "settings.frame_offset.description"
+default         = 1.0
+min             = 0.0
+max             = 120.0
+advanced        = true
+
+[[setting]]
+key             = "frame_width"
+type            = "int"
+label_key       = "settings.frame_width.label"
+description_key = "settings.frame_width.description"
+default         = 1280
+min             = 0
+max             = 7680
+advanced        = true
+
+[[setting]]
+key             = "assignments_file"
+type            = "file"
+label_key       = "settings.assignments_file.label"
+description_key = "settings.assignments_file.description"
+default         = ""
+extensions      = [".json"]
+advanced        = true
+
+[[setting]]
+key             = "shell_wallpaper"
+type            = "bool"
+label_key       = "settings.shell_wallpaper.label"
+description_key = "settings.shell_wallpaper.description"
+default         = false
+
+# --- Watcher / behaviour --------------------------------------------------
+
+[[setting]]
+key             = "extra_args"
+type            = "string_list"
+label_key       = "settings.extra_args.label"
+description_key = "settings.extra_args.description"
+default         = []
+advanced        = true
+
+[[setting]]
+key             = "interval"
+type            = "int"
+label_key       = "settings.interval.label"
+description_key = "settings.interval.description"
+default         = 1000
+min             = 250
+max             = 10000
+advanced        = true
+
+[[setting]]
+key             = "run_on_start"
+type            = "bool"
+label_key       = "settings.run_on_start.label"
+description_key = "settings.run_on_start.description"
+default         = true
+advanced        = true
+
+[[setting]]
+key             = "notify_errors"
+type            = "bool"
+label_key       = "settings.notify_errors.label"
+description_key = "settings.notify_errors.description"
+default         = true
+advanced        = true
