@@ -66,5 +66,6 @@
   "toast.video": "当前壁纸是视频，而视频取色已被关闭。",
   "toast.no_ffmpeg": "找不到 ffmpeg，请先安装或在插件设置中填写它的路径。",
   "toast.frame_failed": "无法从视频中取帧 —— {error}",
-  "toast.missing_binary": "找不到 matugen，请先安装或在插件设置中填写它的路径。"
+  "toast.missing_binary": "找不到 matugen，请先安装或在插件设置中填写它的路径。",
+  "toast.spawn_failed": "无法启动 matugen，请检查插件设置里的可执行文件路径。"
 }

@@ -66,5 +66,6 @@
   "toast.video": "The wallpaper is a video and video sampling is turned off.",
   "toast.no_ffmpeg": "ffmpeg was not found. Install it or set its path in the plugin settings.",
   "toast.frame_failed": "Could not sample a frame from the video — {error}",
-  "toast.missing_binary": "matugen was not found. Install it or set its path in the plugin settings."
+  "toast.missing_binary": "matugen was not found. Install it or set its path in the plugin settings.",
+  "toast.spawn_failed": "Could not start matugen. Check the binary path in the plugin settings."
 }

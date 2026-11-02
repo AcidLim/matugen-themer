@@ -19,7 +19,9 @@ local function render()
     shortcut.setLabel(label)
     shortcut.setIcon("loader")
     shortcut.setActive(true)
-    shortcut.setEnabled(false)
+    -- Stay clickable. A shortcut has no update() timer, so if the run callback
+    -- is lost the tile would otherwise stay disabled until the lock TTL expires;
+    -- clicking again just shows the "busy" toast.
   else
     shortcut.setLabel(noctalia.tr("shortcut.refresh.label"))
     shortcut.setIcon("palette")
@@ -44,6 +46,9 @@ render()
 
 noctalia.state.watch("busy_until", sync)
 noctalia.state.watch("phase", sync)
+-- A run may already be in flight when this entry loads (the control center is
+-- opened mid-regeneration); pick that state up instead of showing "idle".
+sync()
 
 local function refresh()
   M.run(M.targetWallpaper(), {
@@ -73,6 +78,14 @@ function onIpc(event)
   if event == "refresh" then
     refresh()
   end
+end
+
+function onExit(_signal, reason)
+  -- A run started from this tile may still be in flight when the control center
+  -- reloads the shortcut; its callback is discarded with this VM, so do not let
+  -- the service wait on this entry's lock until the TTL expires.
+  M.releaseLock()
+  noctalia.log("matugen: refresh tile stopped (" .. tostring(reason) .. ")")
 end
 
 function onConfigChanged()

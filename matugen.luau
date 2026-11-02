@@ -15,8 +15,15 @@ local video = require("./video.luau")
 local M = {}
 
 -- A run that never reports back (crash, killed process) must not wedge the
--- plugin forever, so the lock carries an expiry instead of a plain flag.
-local BUSY_TTL_MS = 120000
+-- plugin forever, so the lock carries an expiry instead of a plain flag. The
+-- TTL is refreshed when extraction ends and again before matugen starts; it is
+-- only a fallback for a runtime that died without running onExit().
+local BUSY_TTL_MS = 300000
+
+-- The lock lives in noctalia.state and is shared by every entry, but only the
+-- entry that took it may release it: a reloading service must not unlock a run
+-- that the control-center tile started (and vice versa).
+local OWNER = tostring({}) .. ":" .. tostring(noctalia.nowMs())
 
 local running = false     -- this VM only
 local queued_path = nil
@@ -65,7 +72,8 @@ end
 --- by a video, otherwise Noctalia's own wallpaper path.
 function M.sourceFor(connector, assigned)
   if assigned ~= nil then
-    local path = assigned[connector]
+    -- mpvpaper stores a per-output path or the "*" wildcard for "all outputs".
+    local path = assigned[connector] or assigned["*"]
     if path ~= nil and noctalia.fileExists(path) then return path end
   end
   local wp = noctalia.wallpaperPath(connector)
@@ -153,10 +161,22 @@ end
 
 local function lock()
   noctalia.state.set("busy_until", noctalia.nowMs() + BUSY_TTL_MS)
+  noctalia.state.set("busy_owner", OWNER)
 end
 
 local function unlock()
+  local owner = noctalia.state.get("busy_owner")
+  -- nil means a lock left by an older runtime that did not record an owner;
+  -- only an owner that is explicitly someone else is protected.
+  if owner ~= nil and owner ~= OWNER then return end
   noctalia.state.set("busy_until", 0)
+  noctalia.state.set("busy_owner", "")
+end
+
+--- Release this entry's lock. Called from service onExit: another entry's run
+--- must keep its lock when this runtime is reloaded or disabled.
+function M.releaseLock()
+  unlock()
 end
 
 --- Publish run status as flat scalars: noctalia.state only promises plain
@@ -181,8 +201,13 @@ function M.status()
   }
 end
 
--- Notify the caller (or the user) that a request could not start.
+-- Notify the caller (or the user) that a request could not start. The watcher
+-- passes announce=false, so the reason is always logged as well: otherwise
+-- "missing binary" or a folder wallpaper disappears without a trace.
 local function explain(reason, announce)
+  if reason ~= "busy" then
+    noctalia.log("matugen: skipped (" .. tostring(reason) .. ")")
+  end
   if not announce then return end
   local title = noctalia.tr("toast.title")
   if reason == "busy" then
@@ -199,6 +224,8 @@ local function explain(reason, announce)
     noctalia.notifyError(title, noctalia.tr("toast.no_ffmpeg"))
   elseif reason == "missing_binary" then
     noctalia.notifyError(title, noctalia.tr("toast.missing_binary"))
+  elseif reason == "spawn_failed" then
+    noctalia.notifyError(title, noctalia.tr("toast.spawn_failed"))
   end
 end
 
@@ -211,8 +238,18 @@ end
 
 local function finishRun(phase, source, err, frame)
   running = false
-  unlock()
   publish(phase, source, err, frame)
+  unlock()
+end
+
+-- User callbacks must not be able to strand the queue: a throw in onDone would
+-- otherwise skip drain() and leave a queued request pending forever.
+local function notifyDone(opts, ok, err)
+  if opts.onDone == nil then return end
+  local called, message = pcall(opts.onDone, ok, err)
+  if not called then
+    noctalia.log("matugen: onDone failed (" .. tostring(message) .. ")")
+  end
 end
 
 --- Hand the sampled frame back to Noctalia as the output's wallpaper, which is
@@ -222,27 +259,34 @@ end
 local function handoffFrame(frame, source, assigned)
   if noctalia.getConfig("shell_wallpaper") ~= true then return end
 
-  local target = nil
+  local targets = {}
   local outputs = noctalia.outputs()
   if outputs ~= nil then
     for _, output in ipairs(outputs) do
       if M.sourceFor(output.name, assigned) == source then
-        target = output.name
-        break
+        targets[#targets + 1] = output.name
       end
     end
   end
-  if target == nil then target = noctalia.focusedOutputName() end
-  if target == nil then return end
+  -- An assignment can be the "*" wildcard, so every output showing this source
+  -- gets the frame; only fall back to the focused output when nothing matched.
+  if #targets == 0 then
+    local focused = noctalia.focusedOutputName()
+    if focused ~= nil then targets[1] = focused end
+  end
 
-  if noctalia.wallpaperPath(target) == frame then return end
-
-  noctalia.setWallpaper(target, frame)
-  noctalia.log("matugen: handed the sampled frame to Noctalia on " .. target)
+  for _, target in ipairs(targets) do
+    if noctalia.wallpaperPath(target) ~= frame then
+      noctalia.setWallpaper(target, frame)
+      noctalia.log("matugen: handed the sampled frame to Noctalia on " .. target)
+    end
+  end
 end
 
---- Run matugen on a ready image. The lock is already held by the caller.
+--- Run matugen on a ready image. Refreshes the lock so the matugen phase gets
+--- a full TTL instead of whatever is left over from frame extraction.
 local function launch(image, source, opts)
+  lock()
   publish("running", source, nil, image)
 
   local started = noctalia.runAsync(M.args(image), function(result)
@@ -275,13 +319,14 @@ local function launch(image, source, opts)
       end
     end
 
-    if opts.onDone ~= nil then opts.onDone(is_ok, err) end
+    notifyDone(opts, is_ok, err)
     drain()
   end)
 
   if not started then
     finishRun("error", source, "could not start matugen", image)
-    noctalia.log("matugen: could not start " .. M.binary())
+    noctalia.log("matugen: could not start " .. tostring(M.binary()))
+    explain("spawn_failed", opts.announce == true)
     drain()
     return false, "spawn_failed"
   end
@@ -337,13 +382,18 @@ function M.run(source, opts)
       explain("no_ffmpeg", announce)
       return false, "no_ffmpeg"
     end
+    local bin = M.binary()
+    if not M.binaryAvailable(bin) then
+      -- Check before spending time on a frame that could never be coloured.
+      explain("missing_binary", announce)
+      return false, "missing_binary"
+    end
 
     running = true
     lock()
     publish("extracting", source, nil)
-    noctalia.log("matugen: sampling a frame from " .. source)
 
-    video.ensureFrame(source, function(frame, err)
+    local cached = video.ensureFrame(source, function(frame, err)
       if frame == nil then
         local reason = tostring(err or "frame extraction failed")
         finishRun("error", source, reason)
@@ -351,7 +401,7 @@ function M.run(source, opts)
         if cfg("notify_errors") ~= false then
           noctalia.notifyError(noctalia.tr("toast.title"), noctalia.tr("toast.frame_failed", { error = reason }))
         end
-        if opts.onDone ~= nil then opts.onDone(false, reason) end
+        notifyDone(opts, false, reason)
         drain()
         return
       end
@@ -359,7 +409,10 @@ function M.run(source, opts)
       launch(frame, source, opts)
     end)
 
-    return true, "extracting"
+    -- nil: ensureFrame failed before starting (its callback already reported
+    -- it); false: ffmpeg is running; true: cached frame, launch() already ran.
+    if cached == nil then return false, "frame_failed" end
+    return true, cached and "started" or "extracting"
   end
 
   local bin = M.binary()

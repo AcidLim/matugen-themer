@@ -4,13 +4,13 @@
 # Noctalia has no "wallpaper changed" event, so the `themer` service polls the
 # wallpaper path of every output and re-runs Matugen when it moves.
 #
-#   noctalia msg plugins enable matugen-noctalia/matugen-themer
+#   noctalia msg plugins enable Limwe/matugen-themer
 
-id           = "matugen-noctalia/matugen-themer"
+id           = "Limwe/matugen-themer"
 name         = "Matugen Themer"
-version      = "2.1.0"
+version      = "2.2.1"
 plugin_api   = 25
-author       = "matugen-noctalia"
+author       = "Limwe"
 license      = "MIT"
 icon         = "palette"
 description  = "Regenerates your Matugen color scheme from the active wallpaper, so every templated app follows the wallpaper automatically."

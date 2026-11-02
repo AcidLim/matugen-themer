@@ -28,6 +28,23 @@ end
 
 applyInterval()
 
+-- Settings that actually change the palette (or the frame it is built from).
+-- interval / notify_errors / run_on_start must not trigger a matugen run:
+-- dragging the interval slider used to regenerate the whole palette each step.
+local function paletteKey()
+  return table.concat({
+    table.concat(M.args(""), "\0"),
+    tostring(noctalia.getConfig("shell_wallpaper")),
+    tostring(noctalia.getConfig("video_mode")),
+    tostring(noctalia.getConfig("ffmpeg_path")),
+    tostring(noctalia.getConfig("frame_offset")),
+    tostring(noctalia.getConfig("frame_width")),
+    tostring(noctalia.getConfig("assignments_file")),
+  }, "\1")
+end
+
+local last_palette_key = paletteKey()
+
 -- A run refused because another one is in flight is retried on the next tick
 -- instead of being dropped, so fast wallpaper switching still ends on the last
 -- image.
@@ -44,34 +61,18 @@ end
 
 local function poll()
   local sources = M.sources()
+
+  -- Forget outputs that are gone. A monitor that reconnects (or an output
+  -- whose sampled frame was hidden for a while) is then a fresh source instead
+  -- of being compared against a stale path.
+  for connector in pairs(last_source) do
+    if sources[connector] == nil then last_source[connector] = nil end
+  end
+
   if next(sources) == nil then
     -- No outputs yet (or none with a wallpaper): nothing to compare, and the
     -- service must not seed itself on an empty state.
     return
-  end
-  if pending ~= nil and not M.busy() then
-    local source = pending
-    pending = nil
-    noctalia.log("matugen: retrying deferred source -> " .. source)
-    regenerate(source, false)
-    return
-  end
-
-  -- Note the last source that actually moved; one regeneration per tick.
-  local changed = nil
-  local seen = {}
-  for connector, source in pairs(sources) do
-    local previous = last_source[connector]
-    if previous == nil then
-      -- A newly connected output (or the first wallpaper after a session with
-      -- none) counts as a change; the seeding tick itself passes here with
-      -- seeded still false.
-      if seeded then changed = source end
-    elseif previous ~= source and not seen[source] then
-      changed = source
-      seen[source] = true
-    end
-    last_source[connector] = source
   end
 
   local mode = M.mode()
@@ -84,7 +85,10 @@ local function poll()
     -- wallpaper change.
     seeded = true
     local count = 0
-    for _ in pairs(sources) do count = count + 1 end
+    for connector, source in pairs(sources) do
+      last_source[connector] = source
+      count = count + 1
+    end
     noctalia.log("matugen: watching " .. tostring(count) .. " output(s)")
     if noctalia.getConfig("run_on_start") ~= false then
       regenerate(M.targetWallpaper(), false)
@@ -92,9 +96,53 @@ local function poll()
     return
   end
 
-  if changed ~= nil then
-    noctalia.log("matugen: source changed -> " .. changed)
-    regenerate(changed, false)
+  -- A request refused because another entry held the lock is retried once it
+  -- clears. While it is still busy, do not pile up more work.
+  if pending ~= nil then
+    if M.busy() then return end
+    local source = pending
+    pending = nil
+    noctalia.log("matugen: retrying deferred source -> " .. source)
+    regenerate(source, false)
+    return
+  end
+
+  -- Compare every output, then apply one source per tick: matugen only makes
+  -- one palette anyway. Outputs that lost the selection stay stale on purpose
+  -- and are picked up on a later tick. The focused output wins ties, so the
+  -- choice does not depend on pairs() order.
+  local changed = {}
+  for connector, source in pairs(sources) do
+    local previous = last_source[connector]
+    if previous == nil or previous ~= source then
+      changed[connector] = source
+    end
+  end
+
+  local chosen_source = nil
+  if next(changed) ~= nil then
+    local connectors = {}
+    for connector in pairs(changed) do connectors[#connectors + 1] = connector end
+    table.sort(connectors)
+    local chosen_connector = connectors[1]
+    local focused = noctalia.focusedOutputName()
+    if focused ~= nil and changed[focused] ~= nil then
+      chosen_connector = focused
+    end
+    chosen_source = changed[chosen_connector]
+
+    -- Outputs already showing the chosen source are up to date too, so a
+    -- wallpaper shared by several outputs does not trigger a duplicate run.
+    for connector, source in pairs(sources) do
+      if source == chosen_source then last_source[connector] = source end
+    end
+  else
+    for connector, source in pairs(sources) do last_source[connector] = source end
+  end
+
+  if chosen_source ~= nil then
+    noctalia.log("matugen: source changed -> " .. chosen_source)
+    regenerate(chosen_source, false)
   elseif mode_changed then
     -- Only reachable with mode = "auto": the shell flipped light/dark.
     noctalia.log("matugen: shell mode changed -> " .. mode)
@@ -112,10 +160,25 @@ end
 -- regenerate anything, since the watcher would just re-seed).
 function onConfigChanged()
   applyInterval()
+
+  local key = paletteKey()
+  local palette_changed = key ~= last_palette_key
+  last_palette_key = key
+
   seeded = true
   last_mode = M.mode()
-  noctalia.log("matugen: settings changed, regenerating")
-  regenerate(M.targetWallpaper(), false)
+
+  if palette_changed then
+    -- Only seed on the very first config event: after that, last_source must
+    -- keep tracking outputs so a wallpaper change is not swallowed.
+    if next(last_source) == nil then
+      for connector, source in pairs(M.sources()) do
+        last_source[connector] = source
+      end
+    end
+    noctalia.log("matugen: settings changed, regenerating")
+    regenerate(M.targetWallpaper(), false)
+  end
 end
 
 function onIpc(event, payload)
@@ -138,8 +201,8 @@ function onIpc(event, payload)
 end
 
 function onExit(_signal, reason)
-  -- Return the lock so a later run is not blocked by a request that died with
-  -- this runtime.
-  noctalia.state.set("busy_until", 0)
+  -- Return only this entry's lock so a later run is not blocked by a request
+  -- that died with this runtime; never unlock a run started by another entry.
+  M.releaseLock()
   noctalia.log("matugen: service stopped (" .. tostring(reason) .. ")")
 end

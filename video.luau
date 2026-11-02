@@ -17,7 +17,7 @@ local M = {}
 
 local VIDEO_EXT = {
   mp4 = true, webm = true, mkv = true, m4v = true,
-  mov = true, avi = true, ogv = true, wmv = true,
+  mov = true, avi = true, ogv = true, wmv = true, gif = true,
 }
 
 local CACHE_SUBDIR = "frames"
@@ -71,11 +71,16 @@ function M.assignments()
   if path == nil then return {} end
 
   local info = noctalia.fileInfo(path)
-  if info == nil then
+  if info == nil or info.isDir then
     assignments, assignments_stamp = {}, nil
     return assignments
   end
-  if assignments ~= nil and assignments_stamp == info.mtime then
+
+  -- Noctalia may expose mtime as a float whose last digits are unstable
+  -- between calls; whole seconds plus size is the stable key. Size still
+  -- catches a rewrite within the same second.
+  local stamp = tostring(math.floor(tonumber(info.mtime) or 0)) .. ":" .. tostring(info.size)
+  if assignments ~= nil and assignments_stamp == stamp then
     return assignments
   end
 
@@ -85,19 +90,31 @@ function M.assignments()
     decoded = noctalia.json.decode(raw)
   end
 
+  if type(decoded) ~= "table" then
+    -- The mpvpaper service rewrites this file in place, so a read can land on
+    -- a partial write. Keep the last good map and retry next tick instead of
+    -- caching the failure until the next change.
+    if assignments == nil then assignments = {} end
+    return assignments
+  end
+
+  -- Current mpvpaper writes { assignments, lastAssignments, launchedAsSystemd };
+  -- older versions wrote the connector map directly. Read the active map and
+  -- keep the "*" wildcard exactly as written.
+  local root = decoded.assignments
+  if type(root) ~= "table" then root = decoded end
+
   local map = {}
   local count = 0
-  if type(decoded) == "table" then
-    for key, value in pairs(decoded) do
-      if type(value) == "string" and value ~= "" then
-        map[tostring(key)] = value
-        count = count + 1
-      end
+  for key, value in pairs(root) do
+    if type(value) == "string" and value ~= "" then
+      map[tostring(key)] = value
+      count = count + 1
     end
   end
 
   assignments = map
-  assignments_stamp = info.mtime
+  assignments_stamp = stamp
   noctalia.log("matugen: read " .. tostring(count) .. " mpvpaper assignment(s)")
   return assignments
 end
@@ -128,7 +145,10 @@ local function cacheKey(source, info)
   local width = math.floor(tonumber(U.cfg("frame_width", 1280)) or 0)
   local stamp = "?"
   if info ~= nil then
-    stamp = tostring(info.mtime) .. "x" .. tostring(info.size)
+    -- Normalize mtime: Noctalia can return the same timestamp with different
+    -- trailing digits on consecutive calls, which would otherwise rotate the
+    -- frame cache key and re-run ffmpeg for no reason.
+    stamp = tostring(math.floor(tonumber(info.mtime) or 0)) .. "x" .. tostring(info.size)
   end
   return U.hash(source .. "|" .. stamp .. "|" .. tostring(offset) .. "|" .. tostring(width))
 end
@@ -203,35 +223,38 @@ end
 
 --- Ensure a cached still frame for `video`, then call
 --- `cb(frame_path)` or `cb(nil, error)`.
+--- Returns true when a cached frame was reused (cb ran synchronously), false
+--- when extraction was started, and nil when it failed before starting.
 function M.ensureFrame(video, cb)
   if video == nil or video == "" then
     cb(nil, "no video path")
-    return
+    return nil
   end
 
   local dir = cacheDir()
   if dir == nil then
     cb(nil, "no plugin data directory")
-    return
+    return nil
   end
 
   local info = noctalia.fileInfo(video)
   if info == nil or info.isDir then
     cb(nil, "video not found: " .. video)
-    return
+    return nil
   end
 
   local target = dir .. "/" .. cacheKey(video, info) .. ".jpg"
   local cached = noctalia.fileInfo(target)
   if cached ~= nil and cached.size > 0 then
+    noctalia.log("matugen: reusing cached frame from " .. video)
     cb(target)
-    return
+    return true
   end
 
   local bin = M.ffmpeg()
   if not M.available() then
     cb(nil, "ffmpeg not found: " .. bin)
-    return
+    return nil
   end
 
   local offset = tonumber(U.cfg("frame_offset", 1.0)) or 0
@@ -259,6 +282,7 @@ function M.ensureFrame(video, cb)
 
       noctalia.renameFile(tmp, target)
       if noctalia.fileInfo(target) == nil then
+        noctalia.removeFile(tmp)
         cb(nil, "could not store frame in " .. dir)
         return
       end
@@ -268,7 +292,9 @@ function M.ensureFrame(video, cb)
     end)
   end
 
+  noctalia.log("matugen: sampling a frame from " .. video)
   attempt(offset, false)
+  return false
 end
 
 return M
